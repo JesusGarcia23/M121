@@ -593,6 +593,9 @@ db.companies.aggregate([
 ])
 
 // MANUAL BUCKETS
+// Must always specify at least 2 values to boundaries
+// boundaries must all be of the same general type (Numeric, String)
+// count is inserted by default with no output, but removed when output is specified
 db.companies.aggregate([
     {
         $match: {$founded_year: {$gt: 1980} }
@@ -613,6 +616,8 @@ db.companies.aggregate([
 ])
 
 // AUTO BUCKETS
+// Cardinality of groupBy expression may impact even distribution and number of buckets
+// specifying a granularity requires the expression to groupBy to resolve to a numeric value
 db.companies.aggregate([
     {
         $match: {"$offices.city": 'New York'},
@@ -651,7 +656,11 @@ db.companies.aggregate([
 ])
 
 
-//
+// $sortByCount Stage
+// is equivalent to a group stage to count occurence, and then sorting ind escending order
+{
+    $sortByCount: "$<field>"
+}
 
 db.movies.aggregate([
     {
@@ -693,7 +702,285 @@ db.movies.aggregate([
         }
       }
     }
-  ])
+  ]);
+
+
+
+//   $REDACT STAGE
+// PROTECT INFORMATION FROM UNAUNTHORIZED ACCESS
+{
+    $cond: [{$in: ["Management", "$acl"]}, "$$DESCEND", "$$PRUNE" ]
+}
+// Mangament would be de value looking for
+// $acl was the field chose
+
+// $$KEEP and $$PRUNE automatically apply to all levels below the evaluated level
+// $$DESCEND retains the current level and evaluates the next level down
+// $redact is not restricting access to a collection
+
+
+
+// $OUT STAGE
+// USED FOR PERSISTING THE RESULT OF AN AGGREGATION
+
+db.collection.aggregate([
+    {$stage1}, {$stage2}, ..., {$stageN}, {$out: "new_collection"}
+])
+
+// Will create a new collection or overwrite an existing collection if specified
+// Honors indexes on existing collection
+// Will not create or overwrite data if pipeline errors.
+// Creates collections in the same database as the source collection.
+// collections created by $out can't be sharded
+
+
+// $MERGE STAGE
+// Allows flexible ways of saving results of the aggregation into an already existing collection whether or not it's sharded or unsharded
+// or different database (better than $out)
+
+{
+    $merge: {
+        into: "target",
+        on: "field"
+    }
+}
+
+//simple syntax when using same db (into)
+{$merge: {"collection2"}}
+
+//simple syntax when using another db (into)
+{$merge: { db: "db2", coll:"collection2"}}
+
+//on: "_id" // unsharded
+//on: ["_id", "shardkey(s)"] // if the collection is sharded
+//on ["field1", "field2"] // if there is multiple fields you want to filter
+
+// must be unique index if you provide your own merging key
+
+
+{
+    $merge: {
+      into: "target",
+      whenNotMatched: "insert"|"discard"|"fail",
+      whenMatched: "merge"|"replace"|"keepExisting"|"fail"
+    }
+}
+
+//$merge updates fields from mflix.users collection into sv.users collection. Our "_id" field is unique username
+
+// (in mflix) db.users.aggregate(mflix_pipeline)
+
+mflix_pipeline = [
+    {"project": {
+        "_id": "$username",
+        "mflix": "$$ROOT"
+    }},
+    {"$merge": {
+        "into": {
+            "db": "sv",
+            "collection": "users"
+        },
+        "whenNotMatched": "discard"
+    }
+
+    }
+]
+
+
+//$merge updates fields from mfriendbook.users collection into sv.users collection. Our "_id" field is unique username
+
+// (in mfriendbook) db.users.aggregate(mfriendbook_pipeline)
+
+mfriendbook_pipeline = [
+    {"project": {
+        "_id": "$username",
+        "mfriendbook": "$$ROOT"
+    }},
+    {"$merge": {
+        "into": {
+            "db": "sv",
+            "collection": "users"
+        },
+        "whenNotMatched": "discard"
+    }
+
+    }
+]
+
+
+// USING $MERGE FOR A TEMPORARY COLLECTION
+
+// aggregate 'temp' and append valid records to 'data'
+
+db.temp.aggregate([
+    {...}, // pipeline to massage and cleanse data in temp
+    {$merge: {
+        into: "data",
+        whenMatched: "fail"
+    }}
+])
+
+
+
+
+// VIEWS
+// db.createView(<view>, <source>, <pipeline>, <collation>)
+// source is the source collection
+//View definitions are public
+// Avoid referring to sensitive fields within the pipeline that defines a view
+//Views contain no data themselves. They are created on demand and reflect the data in the source collection
+// Views are read only. Write operations to views will error
+// Views have som restrictions. They must abide by the rules of the Aggregation Framework, and cannot contain find() projection operators
+// Horizontal slicing is performed with the $match stage, reducing the number of documents that are returned.
+// Vertical slicing is performed with a $project or other shaping stage, modifying individual documents.
+
+db.createView("bronze_banking", "customers", [
+    {
+        $match: {accountType: "bronze"}
+    },
+    {
+        $project: {
+            _id: 0,
+            name: {
+                $concat: [
+                    { $cond: [{$eq: ["$gender", "female"] }, "Miss", "Mr."] },
+                    " ", "$name.first", " ","$name.last"
+                ]
+            },
+            phone: 1,
+            email: 1,
+            address: 1,
+            account_ending: { $substr: ["$accountNumber", 7, -1] }
+        }
+    }
+])
+
+
+
+// AGGREGATION PERFORMANCE
+
+// Realtime Processing
+
+// - provide data for applications
+// - Query performance is more important
+
+// Batch Processing
+
+// - Provide data for analytics
+// - Query performance is less important
+
+// Index Usage
+db.orders.createIndex({cust_id: 1})
+// top-k sorting algorithm
+db.orders.aggregate([
+    {$match: {cust_id: {$lt: 50} }},
+    {$limit: 10},
+    {$sort: {total: 1}}
+])
+
+// Memory Constraints
+// Results are subject to 16MB document limit
+    // Use $limit and $project
+// 100MB of RAM per stage
+    // Use indexes
+    db.orders.aggregate([...], {allowDiskUse: true})
+        // Doesn't work with $graphLookup (this does not support splitting to disk)
+
+
+
+// Aggregation Pipeline on a Sharded Cluster
+
+// Aggregation Optimizations
+db.restaurants.aggregate([
+    {
+        $match: {cuisine: 'Sushi'}
+    },
+    {
+        $sort: {stars: -1}
+    }
+])
+
+db.restaurants.aggregate([
+    {
+        $limit: 15
+    },
+    {
+        $skip: 10
+    }
+])
+
+// Aggregation Pipeline on a Sharded Cluster
+sh.shardCollection('m201.restaurant', {"address.state": 1})
+db.restaurants.aggregate([
+    {
+        $match: {'address.state': 'NY'}
+    },
+    {
+        $group: {
+            _id: '$address.state',
+            avgStars: {$avg: '$stars'}
+        }
+    }
+])
+
+// PIPELINE OPTIMIZATION #1
+
+db.movies.aggregate([
+    {
+        $match: {
+            title: /^[aeiou]/i
+        }
+    },
+    {
+        $project: {
+            title_size: {$size: { $split: ["$title", " "] } },
+        }
+    },
+    {
+        $group: {
+            _id: "$title_size",
+            count: { $sum: 1 },
+        }
+    },
+    {
+        $sort: { count: -1}
+    }
+])
+
+//OPTIMIZED VERSION
+
+db.movies.aggregate([
+    {
+        $match: {
+            title: /^[aeiou]/i
+        }
+    },
+    {
+        $group: {
+            _id: {
+                $size: { $split: ["$title", " "] }
+            },
+            count: { $sum: 1 },
+        }
+    },
+    {
+        $sort: { count: -1}
+    }
+])
+
+
+// Use accumulator expressions, $map, $reduce, and $filter in project before an $unwind, if possible
+// Every high order array function can be implemented with $reduce if the provided expressions do not meet your needs.
+
+
+
+
+
+
+
+
+
+
 
 
 // EXERCISE
